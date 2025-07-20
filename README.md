@@ -1,10 +1,10 @@
-# 🤖 Gemini-Powered LangChain Agent for Research Tasks
+# 🤖 AI Powered LangChain Agent for Research Tasks
 
 ---
 
 ## 📌 Project Overview
 
-This project is a **research assistant tool** powered by **Google Gemini API** (free-tier) and **LangChain**. It intelligently processes user questions, performs external searches (web + Wikipedia), and returns a structured summary with sources and metadata.
+This project is a **research assistant tool** powered by **Google Gemini AI** and **LangChain**. It intelligently processes user questions, performs external searches (web + Wikipedia), and returns a structured summary with sources and metadata.
 
 > Ideal for building AI tools, education bots, or information summarizers using LangChain and Gemini.
 
