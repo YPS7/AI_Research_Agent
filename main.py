@@ -1,66 +1,102 @@
-
 import os
+import json
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from typing import List, Dict, Any
+
+from langchain_openai import ChatOpenAI
 from langchain.prompts.chat import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
-from langchain_community.tools import DuckDuckGoSearchRun, Tool
-from langchain_community.utilities import WikipediaAPIWrapper
+from langchain.chains import LLMChain
+
+from tools import search_tool, wiki_tool, deep_research_tool
+
 load_dotenv()
-GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
-if not GEMINI_KEY:
-    raise RuntimeError("Please set GOOGLE_API_KEY in your .env file")
-class ResearchResponse(BaseModel):
-    topic: str
-    summary: str
-    sources: list[str]
-    tools_used: list[str]
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite-preview-06-17",
-    google_api_key=GEMINI_KEY,
+OPENROUTER_KEY = os.getenv("API_KEY")
+if not OPENROUTER_KEY:
+    raise RuntimeError("Please set API_KEY in your .env (your OpenRouter key)")
+print("OpenRouter key loaded successfully.")  
+
+llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    openai_api_key=OPENROUTER_KEY,
+    openai_api_base="https://openrouter.ai/api/v1",
+    temperature=0.0,
 )
-parser = PydanticOutputParser(pydantic_object=ResearchResponse)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """
-        You are a research assistant. Answer the user query using tools as needed.
-        Return *only* valid JSON matching the schema:
-        {format_instructions}
-    """),
-    ("placeholder", "{chat_history}"),
+
+
+plan_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "You are a research planner. Given a research question, output a JSON list of steps "
+     "using only these tools: web_search, wiki_search, deep_research. "
+     "Format exactly as: "
+     "[{{\"tool\":\"tool_name\",\"input\":\"optional input\"}}, ...]"),
     ("human", "{query}"),
-    ("placeholder", "{agent_scratchpad}"),
-]).partial(format_instructions=parser.get_format_instructions())
-ddg = DuckDuckGoSearchRun()
-search_tool = Tool(
-    name="web_search",
-    func=ddg.run,
-    description="Search the web for up-to-date information.",
-)
+])
+plan_chain = LLMChain(llm=llm, prompt=plan_prompt, output_key="plan", verbose=True)
 
-wiki = WikipediaAPIWrapper()
-wiki_tool = Tool(
-    name="wiki_search",
-    func=wiki.run,
-    description="Lookup Wikipedia articles.",
-)
 
-tools = [search_tool, wiki_tool]
-agent = create_tool_calling_agent(llm=llm, prompt=prompt, tools=tools)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+def execute_steps(plan: List[Dict[str, Any]], query: str):
+    summaries = []
+    all_sources = []
+    for step in plan:
+        tool_name = step["tool"]
+        inp = step.get("input", query)
+
+        if tool_name == "web_search":
+            raw = search_tool.func(inp)
+            content, sources = raw, []
+        elif tool_name == "wiki_search":
+            raw = wiki_tool.func(inp)
+            content, sources = raw, []
+        elif tool_name == "deep_research":
+            raw = deep_research_tool.func(inp)
+            content = raw.get("analysis", "No analysis available")
+            sources = raw.get("sources", [])
+        else:
+            continue
+
+        if not content:
+            content = "Tool returned no content."  
+
+        summary = llm.invoke(f"Summarize the following result:\n{content}").content
+        summaries.append(summary)
+        all_sources.extend(sources)
+
+    return {"summaries": summaries, "sources": list(set(all_sources))}
+
+
+synth_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "You are an expert researcher. Combine these summaries into a coherent report "
+     "with proper citations."),
+    ("human", "Summaries:\n{summaries}\nSources:\n{sources}")
+])
+synth_chain = LLMChain(llm=llm, prompt=synth_prompt, output_key="report", verbose=True)
+
 if __name__ == "__main__":
     query = input("What can I help you with? ")
-    raw = agent_executor.invoke({"query": query})
 
+    # A) Plan
+    plan_result = plan_chain.invoke({"query": query})
+    plan_str = plan_result["plan"] if isinstance(plan_result, dict) else plan_result
     try:
-        txt = raw["output"]
-        clean = txt.lstrip("```json").rstrip("```").strip()
-        structured: ResearchResponse = parser.parse(clean)
-        print(f"Query: {query}")
-        print(f"Answer: {structured.summary}")
-        print(f"Sources: {', '.join(structured.sources)}")
-        print(f"Tools Used: {', '.join(structured.tools_used)}")
-    except Exception as e:
-        print("Error parsing response:", e)
-        print("Raw agent output:", raw)
+        plan = json.loads(plan_str)
+    except json.JSONDecodeError:
+        print("Planning output was not valid JSON:\n", plan_str)
+
+        plan_str = plan_str.strip().replace("'", '"')
+        try:
+            plan = json.loads(plan_str)
+        except json.JSONDecodeError:
+            exit(1)
+
+    # B) Execute
+    results = execute_steps(plan, query)
+
+    # C) Synthesize
+    final_report = synth_chain.invoke({
+        "summaries": "\n\n".join(results["summaries"]),
+        "sources": "\n".join(results["sources"]),
+    })
+
+    print("\n=== Final Deep Research Report ===\n")
+    print(final_report['report'])  
